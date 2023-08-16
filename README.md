@@ -2,4 +2,7 @@
 
 ### Projects
 1. webapp deploy
-2. next project
+
+### Ideas
+web apps
+functions
