@@ -1,3 +1,5 @@
+! [](C:\Users\pgsebest\OneDrive\Projects\Azure-Bicep\Images\azure bicep.png)
+
 # Azure-Bicep
 
 ## These are projects I have created in Bicep 
