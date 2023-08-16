@@ -4,5 +4,6 @@
 1. webapp deploy
 
 ### Ideas
-web apps
-functions
+1. webapps
+2. functions
+

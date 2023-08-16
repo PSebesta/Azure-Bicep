@@ -8,6 +8,18 @@ param CopyCount int = 2
 ])
 param VmSize string
 
+@description('Storage Account type')
+@allowed([
+  'Premium_LRS'
+  'Premium_ZRS'
+  'Standard_GRS'
+  'Standard_GZRS'
+  'Standard_LRS'
+  'Standard_RAGRS'
+  'Standard_RAGZRS'
+  'Standard_ZRS'
+])
+param storageAccountType string 
 
 param AdminUserName string
 
@@ -16,24 +28,20 @@ param AdminPassword string
 
 param ObjectId string
 
-var VnetName = '${namePrefix}-${uniqueString(resourceGroup().id)}-vnet'
+
 var VnetAddressSpace = '172.17.0.0/16'
-var VmSubnetName = 'Vm-${namePrefix}-subnet'
 var VmSubnet = '172.17.0.64/27'
-var GwSubnetName = 'gw-${namePrefix}-subnet'
 var GwSubnet = '172.17.1.0/24'
 var KeyVaultName = 'Kv-${namePrefix}-${uniqueString(resourceGroup().id)}'
 var vmSizeForTest = 'Standard_B2s'
-var vmSizeForProd = 'Standard_D2s_v3'
-var selectedVmSize = VmSize == 'test' ? vmSizeForTest : vmSizeForProd
-
+var vmSizeForProd = 'Standard_D4s_v3'
+var selectedVmSize = VmSize == 'Test' ? vmSizeForTest : vmSizeForProd
 
 
 resource keyVault 'Microsoft.KeyVault/vaults@2023-02-01' = {
   name: KeyVaultName
   location: rglocation
   properties: {
-    enablePurgeProtection: true
     enabledForTemplateDeployment: true
     enabledForDiskEncryption: true
     tenantId: subscription().tenantId
@@ -61,17 +69,19 @@ resource keyVault 'Microsoft.KeyVault/vaults@2023-02-01' = {
 }
 
 resource storageaccount 'Microsoft.Storage/storageAccounts@2023-01-01' = [for i in range(0, CopyCount): {
-  name: '${namePrefix}${resourceGroup().id}store${i}'
+  name: '${namePrefix}${uniqueString(resourceGroup().id)}stor${i}'
   location: rglocation
-  kind: 'StorageV2'
   sku: {
-    name: 'Standard_RAGRS'
-    
+    name: storageAccountType
+  }
+  kind: 'StorageV2'
+  properties: {
+    accessTier: 'Hot'
   }
 }]
 
 resource virtualNetwork 'Microsoft.Network/virtualNetworks@2023-04-01' = {
-  name: VnetName
+  name: '${namePrefix}-${uniqueString(resourceGroup().id)}-Vnet'
   location: rglocation
   properties: {
     addressSpace: {
@@ -81,13 +91,13 @@ resource virtualNetwork 'Microsoft.Network/virtualNetworks@2023-04-01' = {
     }
     subnets: [
       {
-        name: VmSubnetName
+        name: '${namePrefix}-${uniqueString(resourceGroup().id)}-VmSubnet'
         properties: {
           addressPrefix: VmSubnet
         }
       }
       {
-        name: GwSubnetName
+        name: '${namePrefix}-${uniqueString(resourceGroup().id)}-GwSubnet'
         properties: {
           addressPrefix: GwSubnet
         }
@@ -96,8 +106,8 @@ resource virtualNetwork 'Microsoft.Network/virtualNetworks@2023-04-01' = {
   }
 }
 
-resource publicIPAdress 'Microsoft.Network/publicIPAddresses@2023-04-01' = {
-  name: '${namePrefix}-${uniqueString(resourceGroup().id)}-pip'
+resource publicip 'Microsoft.Network/publicIPAddresses@2023-04-01' = {
+  name: '${namePrefix}-${uniqueString(resourceGroup().id)}-PIP'
   location: rglocation
   sku: {
     name: 'Standard'
@@ -105,24 +115,51 @@ resource publicIPAdress 'Microsoft.Network/publicIPAddresses@2023-04-01' = {
   }
   properties: {
     publicIPAllocationMethod: 'Static'
-    dnsSettings: {
-      domainNameLabel: '${namePrefix}-${uniqueString(resourceGroup().id)}'
-    }
   }
 }
 
+resource networkInterface 'Microsoft.Network/networkInterfaces@2023-04-01' = [for i in range(0, CopyCount): {
+  name: '${namePrefix}-${uniqueString(resourceGroup().id)}-NIC${i}'
+  location: rglocation
+  properties: {
+    ipConfigurations: [
+      {
+        name: '${namePrefix}-IpConfig'
+        properties: {
+          privateIPAllocationMethod: 'Dynamic'
+          subnet: {
+            id: resourceId('Microsoft.Network/virtualNetworks/subnets', '${virtualNetwork.name}', '${namePrefix}-${uniqueString(resourceGroup().id)}-VmSubnet')
+          }
+          loadBalancerBackendAddressPools: [
+            {
+              id: resourceId('Microsoft.Network/loadBalancers/backendAddressPools', '${namePrefix}-${uniqueString(resourceGroup().id)}-LB', '${namePrefix}-backendPool')
+            }
+          ]
+        }
+      }
+    ]
+    networkSecurityGroup: {
+      id: resourceId('Microsoft.Network/networkSecurityGroups', '${namePrefix}-${uniqueString(resourceGroup().id)}-NSG')
+    }
+  }
+  dependsOn: [
+    loadBalancerInternal
+  ]
+}]
+
+//Basic NSG setting to test deployment will need to add specific ports based on feedback
 resource networkSecurityGroup 'Microsoft.Network/networkSecurityGroups@2023-04-01' = {
-  name: '${namePrefix}-${uniqueString(resourceGroup().id)}-nsg'
+  name: '${namePrefix}-${uniqueString(resourceGroup().id)}-NSG'
   location: rglocation
   properties: {
     securityRules: [
       {
-        name: '${namePrefix}nsgR1'
+        name: 'nsgRule'
         properties: {
           description: 'description'
-          protocol: 'Tcp'
+          protocol: '*'
           sourcePortRange: '*'
-          destinationPortRange: '3389'
+          destinationPortRange: '80'
           sourceAddressPrefix: '*'
           destinationAddressPrefix: '*'
           access: 'Allow'
@@ -134,57 +171,39 @@ resource networkSecurityGroup 'Microsoft.Network/networkSecurityGroups@2023-04-0
   }
 }
 
-resource networkInterface 'Microsoft.Network/networkInterfaces@2023-04-01' = [for i in range(0, CopyCount): {
-  name: '${namePrefix}-${uniqueString(resourceGroup().id)}-vnic-${i}'
-  location: rglocation
-  properties: {
-    ipConfigurations: [
-      {
-        name: '${namePrefix}-ipconf1'
-        properties: {
-          privateIPAllocationMethod: 'Dynamic'
-          subnet: {
-            id: format('Microsoft.Network/virtualNetworks/subnets/%s/%s', virtualNetwork.name, VmSubnetName)
-          }
-        }
-      }
-    ]
-    networkSecurityGroup: {
-      id: format('Microsoft.Network/networkSecurityGroups/%s', networkSecurityGroup.name)
-    }
-  }
-}]
-
 resource loadBalancerInternal 'Microsoft.Network/loadBalancers@2023-04-01' = {
   name: '${namePrefix}-${uniqueString(resourceGroup().id)}-LB'
   location: rglocation
+  sku: {
+    name: 'Standard'
+  }
   properties: {
     frontendIPConfigurations: [
       {
-        name: '${namePrefix}-LB-FrontEnd'
+        name: '${namePrefix}-FrtEndIpConf'
         properties: {
           privateIPAddress: '172.17.0.94'
           privateIPAllocationMethod: 'Static'
           subnet: {
-            id: format('Microsoft.Network/virtualNetworks/subnets/%s/%s', virtualNetwork.name, VmSubnetName)
+            id: resourceId('Microsoft.Network/virtualNetworks/subnets', '${virtualNetwork.name}', '${namePrefix}-${uniqueString(resourceGroup().id)}-VmSubnet')
           }
         }
       }
     ]
     backendAddressPools: [
       {
-        name: '${namePrefix}-BckEndPool'
+        name: '${namePrefix}-backendPool'
       }
     ]
     loadBalancingRules: [
       {
-        name: '${namePrefix}-LBRule1'
+        name: '${namePrefix}-LBRule'
         properties: {
           frontendIPConfiguration: {
-            id: 'frontendIPConfiguration.id'
+            id: resourceId('Microsoft.Network/loadBalancers/frontendIpConfigurations', '${namePrefix}-${uniqueString(resourceGroup().id)}-LB', '${namePrefix}-FrtEndIpConf')
           }
           backendAddressPool: {
-            id: 'backendAddressPool.id'
+            id: resourceId('Microsoft.Network/loadBalancers/backendAddressPools', '${namePrefix}-${uniqueString(resourceGroup().id)}-LB', '${namePrefix}-backendPool')
           }
           protocol: 'Tcp'
           frontendPort: 80
@@ -192,27 +211,77 @@ resource loadBalancerInternal 'Microsoft.Network/loadBalancers@2023-04-01' = {
           enableFloatingIP: false
           idleTimeoutInMinutes: 5
           probe: {
-            id: 'probe.id'
+            id: resourceId('Microsoft.Network/loadBalancers/probes', '${namePrefix}-${uniqueString(resourceGroup().id)}-LB', '${namePrefix}-probes')
           }
         }
       }
     ]
     probes: [
       {
-        name: 'name'
+        name: '${namePrefix}-probes'
         properties: {
           protocol: 'Tcp'
           port: 80
-          intervalInSeconds: 5
+          intervalInSeconds: 15
           numberOfProbes: 2
         }
       }
     ]
   }
+  dependsOn: []
 }
 
+resource windowsVM 'Microsoft.Compute/virtualMachines@2023-03-01' = [for i in range(0, CopyCount): {
+  name: '${namePrefix}-${uniqueString(resourceGroup().id)}-VM${i}'
+  location: rglocation
+  properties: {
+    hardwareProfile: {
+      vmSize: selectedVmSize
+    }
+    osProfile: {
+      computerName: '${namePrefix}server'
+      adminUsername: AdminUserName
+      adminPassword: AdminPassword
+      windowsConfiguration:{
+        provisionVMAgent: true
+        enableAutomaticUpdates: false
+        patchSettings: {
+          patchMode: 'Manual'
+          assessmentMode: 'ImageDefault'
+        }
+        enableVMAgentPlatformUpdates: false
+      }
+    }
+    storageProfile: {
+      imageReference: {
+        publisher: 'MicrosoftWindowsServer'
+        offer: 'WindowsServer'
+        sku: '2022-datacenter-azure-edition'
+        version: 'latest'
+      }
+      osDisk: {
+        name: '${namePrefix}-${uniqueString(resourceGroup().id)}-OsDisk${i}'
+        caching: 'ReadWrite'
+        createOption: 'FromImage'
+      }
+    }
+    networkProfile: {
+      networkInterfaces: [
+        {
+          id: networkInterface[i].id
+        }
+      ]
+    }
+    diagnosticsProfile: {
+      bootDiagnostics: {
+        enabled: true
+      }
+    }
+  }
+}]
+
 resource applicationGateway 'Microsoft.Network/applicationGateways@2023-04-01' = {
-  name: '${namePrefix}-${uniqueString(resourceGroup().id)}-AppGW'
+  name: '${namePrefix}-${uniqueString(resourceGroup().id)}-AppGw'
   location: rglocation
   properties: {
     sku: {
@@ -222,42 +291,49 @@ resource applicationGateway 'Microsoft.Network/applicationGateways@2023-04-01' =
     }
     gatewayIPConfigurations: [
       {
-        name: 'name'
+        name: '${namePrefix}-GwIpConf'
         properties: {
           subnet: {
-            id: 'id'
+            id: resourceId('Microsoft.Network/virtualNetworks/subnets', '${virtualNetwork.name}', '${namePrefix}-${uniqueString(resourceGroup().id)}-GwSubnet')
           }
         }
       }
     ]
     frontendIPConfigurations: [
       {
-        name: 'name'
+        name: '${namePrefix}-FrtEndIpConf'
         properties: {
           publicIPAddress: {
-            id: 'id'
+            id: resourceId('Microsoft.Network/publicIPAddresses', '${publicip.name}')
           }
         }
       }
     ]
     frontendPorts: [
       {
-        name: 'name'
+        name: '${namePrefix}-FrtPort'
         properties: {
-          port: 'port'
+          port: 80
         }
       }
     ]
     backendAddressPools: [
       {
-        name: 'name'
+        name: '${namePrefix}-BckEndPool'
+        properties: {
+          backendAddresses: [
+            {
+              ipAddress: '172.17.0.94'
+            }
+          ]
+        }
       }
     ]
     backendHttpSettingsCollection: [
       {
-        name: 'name'
+        name: '${namePrefix}-BckHttpSet'
         properties: {
-          port: 'port'
+          port: 80
           protocol: 'Http'
           cookieBasedAffinity: 'Disabled'
         }
@@ -265,13 +341,13 @@ resource applicationGateway 'Microsoft.Network/applicationGateways@2023-04-01' =
     ]
     httpListeners: [
       {
-        name: 'name'
+        name: '${namePrefix}HttpListener'
         properties: {
           frontendIPConfiguration: {
-            id: 'id'
+            id: resourceId('Microsoft.Network/applicationGateways/frontendIpConfigurations', '${namePrefix}-${uniqueString(resourceGroup().id)}-AppGw', '${namePrefix}-FrtEndIpConf')
           }
           frontendPort: {
-            id: 'id'
+            id: resourceId('Microsoft.Network/applicationGateways/frontendPorts', '${namePrefix}-${uniqueString(resourceGroup().id)}-AppGw', '${namePrefix}-FrtPort')
           }
           protocol: 'Http'
           sslCertificate: null
@@ -280,30 +356,30 @@ resource applicationGateway 'Microsoft.Network/applicationGateways@2023-04-01' =
     ]
     requestRoutingRules: [
       {
-        name: 'name'
+        name: '${namePrefix}-RouteRule'
         properties: {
           ruleType: 'Basic'
+          priority: 1
           httpListener: {
-            id: 'id'
+            id: resourceId('Microsoft.Network/applicationGateways/httpListeners', '${namePrefix}-${uniqueString(resourceGroup().id)}-AppGw', '${namePrefix}HttpListener')
           }
           backendAddressPool: {
-            id: 'id'
+            id: resourceId('Microsoft.Network/applicationGateways/backendAddressPools', '${namePrefix}-${uniqueString(resourceGroup().id)}-AppGw', '${namePrefix}-BckEndPool')
           }
           backendHttpSettings: {
-            id: 'id'
+            id: resourceId('Microsoft.Network/applicationGateways/backendHttpSettingsCollection', '${namePrefix}-${uniqueString(resourceGroup().id)}-AppGw', '${namePrefix}-BckHttpSet')
           }
         }
       }
     ]
+    firewallPolicy: {
+      id: appGW_AppFW_Pol.id
+    }
   }
-  dependsOn: [
-    virtualNetwork
-    publicIPAdress
-  ]
 }
 
-resource applicationGatewayFirewall 'Microsoft.Network/ApplicationGatewayWebApplicationFirewallPolicies@2023-04-01' = {
-  name: '${namePrefix}-${uniqueString(resourceGroup().id)}-WafPolicy'
+resource appGW_AppFW_Pol 'Microsoft.Network/ApplicationGatewayWebApplicationFirewallPolicies@2023-04-01' = {
+  name: '${namePrefix}-${uniqueString(resourceGroup().id)}-AppGwFWPol'
   location: rglocation
   properties: {
     policySettings: {
@@ -322,47 +398,18 @@ resource applicationGatewayFirewall 'Microsoft.Network/ApplicationGatewayWebAppl
       ]
     }
   }
-  dependsOn: [
-    publicIPAdress
-    virtualNetwork
-    applicationGateway
-    networkSecurityGroup
-  ]
 }
-
-resource windowsVM 'Microsoft.Compute/virtualMachines@2023-03-01' = [for i in range(0, CopyCount): {
-  name: '${namePrefix}-${uniqueString(resourceGroup().id)}-Vm${i}'
+//install IIs on webservers to test end to end 
+resource runCommand 'Microsoft.Compute/virtualMachines/runCommands@2023-03-01' = [for i in range(0, CopyCount): {
+  name: '${windowsVM[i].name}/InstallIIS'
   location: rglocation
   properties: {
-    hardwareProfile: {
-      vmSize: selectedVmSize
+    asyncExecution: false
+    source: {
+      script: '''
+      Install-WindowsFeature -name Web-Server -IncludeManagementTools
+    '''
     }
-    osProfile: {
-      computerName: '${namePrefix}server${i}'
-      adminUsername: AdminUserName
-      adminPassword: AdminPassword
-    }
-    storageProfile: {
-      imageReference: {
-        publisher: 'MicrosoftWindowsServer'
-        offer: 'WindowsServer'
-        sku: '2022-datacenter-azure-edition'
-        version: 'latest'
-      }
-      osDisk: {
-        name: '${namePrefix}-${uniqueString(resourceGroup().id)}-OsDisk'
-        caching: 'ReadWrite'
-        createOption: 'FromImage'
-      }
-    }
-    networkProfile: {
-      networkInterfaces: [
-        {
-          id: format('Microsoft.Network/networkInterfaces/%s', networkInterface[i].name)
-        }
-      ]
-    }
-    }
-}]
-
-
+  }
+}
+]
